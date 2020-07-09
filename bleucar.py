@@ -1,4 +1,20 @@
 import bluetooth
+import RPi.GPIO as GPIO
+from time import sleep
+
+GPIO.setmode(GPIO.BCM)
+
+Motor1a = 19
+Motor1b = 6
+Motor2a = 13
+Motor2b = 5
+
+GPIO.setup(33, GPIO.OUT)
+GPIO.setup(34, GPIO.OUT)
+GPIO.setup(35, GPIO.OUT)
+GPIO.setup(37, GPIO.OUT)
+
+
 
 
 server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
@@ -27,6 +43,15 @@ try:
         data = client_sock.recv(1024)
         if not data:
             break
+            (x,y,z,s,q) = data
+        if y > 47 :
+            GPIO.output(Motor1a,GPIO.HIGH)
+            GPIO.output(Motor1b,GPIO.HIGH)
+            GPIO.output
+        else:
+            GPIO.output(Motor1a,GPIO.LOW)
+            GPIO.output(Motor1b,GPIO.LOW)
+
         print("Received", data)
 except OSError:
     pass
@@ -35,4 +60,4 @@ print("Disconnected.")
 
 client_sock.close()
 server_sock.close()
-print("All done.")
+print("All done.)
