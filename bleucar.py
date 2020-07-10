@@ -2,6 +2,7 @@ import bluetooth
 import RPi.GPIO as GPIO
 from time import sleep
 
+
 GPIO.setmode(GPIO.BCM)
 
 Motor1a = 19
@@ -37,21 +38,32 @@ print("Waiting for connection on RFCOMM channel", port)
 
 client_sock, client_info = server_sock.accept()
 print("Accepted connection from", client_info)
-
 try:
     while True:
         data = client_sock.recv(1024)
         if not data:
             break
-            (x,y,z,s,q) = data
+        (x,y,z,s,q) = data
         if y > 47 :
             GPIO.output(Motor1a,GPIO.HIGH)
-            GPIO.output(Motor1b,GPIO.HIGH)
-            GPIO.output
-        else:
+            GPIO.output(Motor1b,GPIO.LOW)
+            GPIO.output(Motor2a,GPIO.LOW)
+            GPIO.output(Motor2b,GPIO.HIGH)
+        else :
             GPIO.output(Motor1a,GPIO.LOW)
             GPIO.output(Motor1b,GPIO.LOW)
-
+            GPIO.output(Motor2a,GPIO.LOW)
+            GPIO.output(Motor2b,GPIO.LOW)
+        if z > 124 :
+            GPIO.output(Motor1a,GPIO.HIGH)
+            GPIO.output(Motor1b,GPIO.LOW)
+            GPIO.output(Motor2a,GPIO.LOW)
+            GPIO.output(Motor2b,GPIO.LOW)
+        else z < 62 :
+            GPIO.output(Motor1a,GPIO.LOW)
+            GPIO.output(Motor1b,GPIO.LOW)
+            GPIO.output(Motor2a,GPIO.HIGH)
+            GPIO.output(Motor2b,GPIO.LOW)
         print("Received", data)
 except OSError:
     pass
@@ -60,4 +72,6 @@ print("Disconnected.")
 
 client_sock.close()
 server_sock.close()
-print("All done.)
+
+print("All done.")
+print("BIG DADDY GONNA TAKE A COLD ONE REAL QUICK")
