@@ -1,0 +1,4 @@
+temp/*.png
+*.h5
+model.tflite
+__pycache__

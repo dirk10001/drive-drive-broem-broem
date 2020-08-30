@@ -1,142 +1,196 @@
-import cv2
+import time
+import threading
+import queue
+
+import bluetooth
+import tflite_runtime.interpreter as tflite
 import numpy as np
-import logging
-import math
-from keras.models import load_model
-from hand_coded_lane_follower import HandCodedLaneFollower
+import cv2
 
-_SHOW_IMAGE = False
+import car
+import car_ai
+import car_capture
+
+# initialize video capture
+cap = cv2.VideoCapture(0)
+
+#define car states
+STOPPED = 0 # the car is stopped
+DRIVING = 1 # the car is being steered with the remote control
+AI = 2 # the car is being steered by the neural network
+LD = 3 # the car is being steered by the lane driving algorithm
+
+#set the initial state that the the car is stopped
+state = STOPPED
+
+#initialize the system as running
+running = True
+
+#initialize the car
+car.init()
+
+#the driving thread, loop while running and take action based on the current state
+def driving(qRead):
+    global state
+    global running
+    while running :
+        s = state
+        if s == DRIVING:
+            #start the car if it is stopped
+            if car.stopped :
+                car.start()
+            try:
+                #read the steering angle from the remote control and update the car
+                angle = qRead.get(True, 0.2)
+                car.steeringAngle = angle
+                car.update()
+            except queue.Empty as e:
+                print('Timeout on get angle from queue')
+        elif s == AI:
+            #start the car if it is stopped
+            if car.stopped :
+                car.start()
+            #use the neural network to compute the steering angle from the current video frame
+            angle = car_ai.compute_steering_angle(cap)
+            print("angle " + str(angle))
+            car.steeringAngle = angle
+            car.update()
+        elif s == LD:
+            #start the car if it is stopped
+            if car.stopped :
+                car.start()
+            #use the lane algorithm to compute the steering angle from the current video frame
+            angle = car_ai.computeSteeringAngleWithHough(cap)
+            print("angle " + str(angle))
+            car.steeringAngle = angle
+            car.update()
+        else :
+            if not car.stopped :
+                #stop the car
+                print('STOP CAR')
+                car.stop()
+
+#recording thread, capture an image each 200 milliseconds
+def recording():
+    global running
+    global cap
+    #if the program is running
+    if running :
+        #save the current frame
+        car_capture.save_image(cap, car.steeringAngle, car.left,car.right)
+        #excute the next capture in 200 milliseconds
+        threading.Timer(0.2, recording).start()
+
+#controller thread, listen to the bluetooth controller for commands
+def controller(qWrite):
+
+    global state
+    global running
+
+    #while the program is running
+    while running:
+
+        try:
+            #create a bluetooth connection
+            server_sock = bluetooth.BluetoothSocket(bluetooth.RFCOMM)
+            server_sock.bind(("", bluetooth.PORT_ANY))
+            server_sock.listen(1)
+
+            port = server_sock.getsockname()[1]
+            uuid="fe6e06bc-ac1e-11ea-bb37-0242ac130002"
+            bluetooth.advertise_service(server_sock, "SampleService", service_id=uuid,
+                                        service_classes=[uuid, bluetooth.SERIAL_PORT_CLASS],
+                                        profiles=[bluetooth.SERIAL_PORT_PROFILE],
+                                        # protocols=[bluetooth.OBEX_UUID]
+                                        )
+            #wait for the controller to connect
+            print("Waiting for connection on RFCOMM channel", port)
+            client_sock, client_info = server_sock.accept()
+            print("Accepted connection from", client_info)
+
+            try:
+                #while there is a connection
+                while True:
+                    #read data from the controller
+                    data = client_sock.recv(1024)
+                    if not data:
+                        break
+                    data = data.decode('utf8')
+                    print("Received", data)
+
+                    if data == 'START':
+                        print("STARTING")
+                        #send ack to the controller
+                        client_sock.send(b'\x01')
+                        state = DRIVING
+                    elif data == 'STOP!':
+                        print("STOPPING")
+                        #send ack to the controller
+                        client_sock.send(b'\x01')
+                        state = STOPPED
+                    elif data == 'USEAI':
+                        print("SWITCH TO AI")
+                        #send ack to the controller
+                        client_sock.send(b'\x01')
+                        state = AI
+                    elif data == 'USELD':
+                        print("SWITCH TO LANE DETECTION")
+                        #send ack to the controller
+                        client_sock.send(b'\x01')
+                        state = LD
+                    elif data == 'S_REC':
+                        print("Start recording")
+                        #send ack to the controller
+                        client_sock.send(b'\x01')
+                        #start saving images
+                        car_capture.start()
+                    elif data == 'Q_REC':
+                        print("Stop recording")
+                        #send ack to the controller
+                        client_sock.send(b'\x01')
+                        #stop saving images
+                        car_capture.stop()
+                    else :
+
+                        if state == DRIVING:
+                            try:
+                                #if the current state is driving then the data is the current angle.
+                                print("STATE " + str(state) + " data " + data)
+                                #send the angle to the driving thread
+                                qWrite.put(float(data))
+                            except Exception as e:
+                                print("Not a float " + data)
+            except OSError:
+                pass
+
+            print("Disconnected.")
+            client_sock.close()
+            server_sock.close()
+            print("Sockets closed")
+        except Exception as e:
+            #Unexpected error quit running
+            print(e)
+            running = False
+
+    print("Disconnected.")
+    print("All done.")
 
 
-class EndToEndLaneFollower(object):
+#create a queue to send angles from the controller thread to the driving thread
+q = queue.Queue()
+#create driving thread
+driving_thread = threading.Thread(target = driving, args = (q,))
+#create driving thread
+controller_thread = threading.Thread(target = controller, args = (q,))
 
-    def __init__(self,
-                 car=None,
-                 model_path='lane.h5'
-        logging.info('Creating a EndToEndLaneFollower...')
+#start driving thread
+driving_thread.start()
+#start controller thread
+controller_thread.start()
+#start recording (schedule a capture each 200 ms, an mage is only saved if the recording is active)
+recording()
 
-        self.car = car
-        self.curr_steering_angle = 90
-        self.model = load_model(model_path)
-
-    def follow_lane(self, frame):
-        # Main entry point of the lane follower
-        show_image("orig", frame)
-
-        self.curr_steering_angle = self.compute_steering_angle(frame)
-        logging.debug("curr_steering_angle = %d" % self.curr_steering_angle)
-
-        if self.car is not None:
-            self.car.front_wheels.turn(self.curr_steering_angle)
-        final_frame = display_heading_line(frame, self.curr_steering_angle)
-
-        return final_frame
-
-    def compute_steering_angle(self, frame):
-        """ Find the steering angle directly based on video frame
-            We assume that camera is calibrated to point to dead center
-        """
-        preprocessed = img_preprocess(frame)
-        X = np.asarray([preprocessed])
-        steering_angle = self.model.predict(X)[0]
-
-        logging.debug('new steering angle: %s' % steering_angle)
-        return int(steering_angle + 0.5) # round the nearest integer
-
-
-def img_preprocess(image):
-    height, _, _ = image.shape
-    image = image[int(height/2):,:,:]  # remove top half of the image, as it is not relevant for lane following
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2YUV)  # Nvidia model said it is best to use YUV color space
-    image = cv2.GaussianBlur(image, (3,3), 0)
-    image = cv2.resize(image, (200,66)) # input image size (200,66) Nvidia model
-    image = image / 255 # normalizing, the processed image becomes black for some reason.  do we need this?
-    return image
-
-def display_heading_line(frame, steering_angle, line_color=(0, 0, 255), line_width=5, ):
-    heading_image = np.zeros_like(frame)
-    height, width, _ = frame.shape
-
-    # figure out the heading line from steering angle
-    # heading line (x1,y1) is always center bottom of the screen
-    # (x2, y2) requires a bit of trigonometry
-
-    # Note: the steering angle of:
-    # 0-89 degree: turn left
-    # 90 degree: going straight
-    # 91-180 degree: turn right
-    steering_angle_radian = steering_angle / 180.0 * math.pi
-    x1 = int(width / 2)
-    y1 = height
-    x2 = int(x1 - height / 2 / math.tan(steering_angle_radian))
-    y2 = int(height / 2)
-
-    cv2.line(heading_image, (x1, y1), (x2, y2), line_color, line_width)
-    heading_image = cv2.addWeighted(frame, 0.8, heading_image, 1, 1)
-
-    return heading_image
-
-
-def show_image(title, frame, show=_SHOW_IMAGE):
-    if show:
-        cv2.imshow(title, frame)
-
-
-############################
-# Test Functions
-############################
-def test_photo(file):
-    lane_follower = EndToEndLaneFollower()
-    frame = cv2.imread(file)
-    combo_image = lane_follower.follow_lane(frame)
-    show_image('final', combo_image, True)
-    logging.info("filename=%s, model=%3d" % (file, lane_follower.curr_steering_angle))
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-
-def test_video(video_file):
-    end_to_end_lane_follower = EndToEndLaneFollower()
-    hand_coded_lane_follower = HandCodedLaneFollower()
-    cap = cv2.VideoCapture(video_file + '.avi')
-
-    # skip first second of video.
-    for i in range(3):
-        _, frame = cap.read()
-
-    video_type = cv2.VideoWriter_fourcc(*'XVID')
-    video_overlay = cv2.VideoWriter("%s_end_to_end.avi" % video_file, video_type, 20.0, (320, 240))
-    try:
-        i = 0
-        while cap.isOpened():
-            _, frame = cap.read()
-            frame_copy = frame.copy()
-            logging.info('Frame %s' % i)
-            combo_image1 = hand_coded_lane_follower.follow_lane(frame)
-            combo_image2 = end_to_end_lane_follower.follow_lane(frame_copy)
-
-            diff = end_to_end_lane_follower.curr_steering_angle - hand_coded_lane_follower.curr_steering_angle;
-            logging.info("desired=%3d, model=%3d, diff=%3d" %
-                          (hand_coded_lane_follower.curr_steering_angle,
-                          end_to_end_lane_follower.curr_steering_angle,
-                          diff))
-            video_overlay.write(combo_image2)
-            cv2.imshow("Hand Coded", combo_image1)
-            cv2.imshow("Deep Learning", combo_image2)
-
-            i += 1
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-    finally:
-        cap.release()
-        video_overlay.release()
-        cv2.destroyAllWindows()
-
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
-
-    #test_video('/home/pi/DeepPiCar/models/lane_navigation/data/images/video01')
-    #test_photo('/home/pi/DeepPiCar/models/lane_navigation/data/images/video01_100_084.png')
-    # test_photo(sys.argv[1])
-    # test_video(sys.argv[1])
+#wait for the contrller thread to finish
+controller_thread.join()
+driving_thread.join()
+car.cleanup()
